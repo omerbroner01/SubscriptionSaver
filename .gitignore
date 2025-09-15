@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtualenv
+.venv/
+
+# Local environment & secrets
+.env
+
+# Local SQLite DB (kept outside repo)
+instance/
+*.db
+
+# OS/editor cruft
+.DS_Store
+Thumbs.db
+
+# Python packaging
+*.egg-info/
+dist/
+build/

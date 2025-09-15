@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Subscription Tracker</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@4.5.2/dist/css/bootstrap.min.css" rel="stylesheet"/>
+  <style>
+    body { padding-top: 24px; }
+    .page-header { margin-bottom: 16px; }
+    .table td, .table th { vertical-align: middle; }
+  </style>
+</head>
+<body class="p-3">
+<div class="container">
+  <!-- Top bar -->
+  <div class="d-flex align-items-center justify-content-between page-header">
+    <h1 class="h2 m-0">Subscription Tracker</h1>
+    <div>
+      {% if current_user.is_authenticated %}
+        <a class="btn btn-link" href="{{ url_for('logout') }}">Logout</a>
+      {% else %}
+        <a class="btn btn-outline-primary btn-sm mr-2" href="{{ url_for('login') }}">Log in</a>
+        <a class="btn btn-primary btn-sm" href="{{ url_for('signup') }}">Sign up</a>
+      {% endif %}
+    </div>
+  </div>
+
+  <p class="text-muted">Track your recurring subscriptions and never forget to cancel free trials!</p>
+
+  <!-- Plan banner -->
+  {% if current_user.is_authenticated %}
+    {% if not current_user.is_premium %}
+      <div class="alert alert-info d-flex justify-content-between align-items-center">
+        <div>You are on the <strong>Free</strong> plan (limit: 5 subscriptions).</div>
+        <a class="btn btn-sm btn-success" href="{{ url_for('upgrade') }}">Upgrade</a>
+      </div>
+    {% else %}
+      <div class="alert alert-success d-flex justify-content-between align-items-center">
+        <div>You are <strong>Premium</strong> — unlimited subscriptions enabled.</div>
+        <a class="btn btn-sm btn-outline-dark" href="{{ url_for('billing') }}">Manage billing</a>
+      </div>
+    {% endif %}
+  {% endif %}
+
+  <!-- Flash messages -->
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      <div class="mt-2">
+        {% for category, message in messages %}
+          <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
+            {{ message }}
+            <button type="button" class="close" data-dismiss="alert" aria-label="Close">
+              <span aria-hidden="true">&times;</span>
+            </button>
+          </div>
+        {% endfor %}
+      </div>
+    {% endif %}
+  {% endwith %}
+
+  {% if current_user.is_authenticated %}
+    <!-- Add form -->
+    <form method="POST" class="form-inline my-3">
+      <input type="text" name="name" class="form-control mb-2 mr-sm-2" placeholder="Subscription Name" required />
+      <input type="number" step="0.01" name="price" class="form-control mb-2 mr-sm-2" placeholder="Price ($)" required />
+      <input type="date" name="renewal_date" class="form-control mb-2 mr-sm-2" required />
+      <button type="submit" class="btn btn-primary mb-2">Add</button>
+    </form>
+
+    <!-- List -->
+    {% if subscriptions %}
+      <h3 class="h4">Your Subscriptions:</h3>
+      <table class="table table-striped">
+        <thead>
+          <tr>
+            <th style="min-width:220px;">Name</th>
+            <th>Price (monthly)</th>
+            <th>Next Renewal</th>
+            <th style="width:110px;">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for sub in subscriptions %}
+          <tr>
+            <td class="font-weight-medium">{{ sub.name }}</td>
+            <td>${{ "%.2f"|format(sub.price) }}</td>
+            <td>
+              {{ sub.renewal_date }}
+              {% if sub.name in upcoming %}
+                <span class="badge badge-danger ml-2">Due soon</span>
+              {% endif %}
+            </td>
+            <td>
+              <form method="POST" action="{{ url_for('delete_sub', sub_id=sub.id) }}" onsubmit="return confirm('Delete this subscription?');">
+                <button type="submit" class="btn btn-sm btn-outline-danger">Delete</button>
+              </form>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      <p class="font-weight-bold">Total Monthly Cost: ${{ "%.2f"|format(total_cost) }}</p>
+    {% else %}
+      <p><em>No subscriptions added yet.</em></p>
+    {% endif %}
+  {% else %}
+    <div class="alert alert-secondary mt-3">
+      Please <a href="{{ url_for('login') }}">log in</a> or <a href="{{ url_for('signup') }}">create an account</a> to start tracking subscriptions.
+    </div>
+  {% endif %}
+</div>
+
+<script src="https://code.jquery.com/jquery-3.5.1.slim.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/popper.js@1.16.1/dist/umd/popper.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@4.5.2/dist/js/bootstrap.min.js"></script>
+</body>
+</html>
