@@ -1,6 +1,5 @@
-import os
 from datetime import datetime, timedelta
-
+import os
 from flask import Flask, request, render_template, redirect, url_for, flash
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import (
@@ -8,48 +7,49 @@ from flask_login import (
     login_required, current_user
 )
 from werkzeug.security import generate_password_hash, check_password_hash
+from dotenv import load_dotenv
 import stripe
 
-# --- Load .env if present ---
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except Exception:
-    pass
-
+# --- Env/config ---
+load_dotenv()
 app = Flask(__name__)
 app.secret_key = os.getenv('SECRET_KEY', 'dev-secret-key')
 
-# --- Database: store under the "instance" folder ---
+# SQLite in instance folder
 os.makedirs(app.instance_path, exist_ok=True)
-default_sqlite_path = 'sqlite:///' + os.path.join(app.instance_path, 'subscriptions.db')
-app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL', default_sqlite_path)
+app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv(
+    'DATABASE_URL',
+    f"sqlite:///{os.path.join(app.instance_path, 'subscriptions.db')}"
+)
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
-# --- Login manager ---
+# Login manager
 login_manager = LoginManager(app)
 login_manager.login_view = 'login'
 
-# --- Stripe config (test mode keys live in .env) ---
+# Stripe
 stripe.api_key = os.getenv('STRIPE_SECRET_KEY')
 STRIPE_PRICE_ID = os.getenv('STRIPE_PRICE_ID')
+PUBLISHABLE_KEY = os.getenv('STRIPE_PUBLISHABLE_KEY')
+
+# Free plan limit
+FREE_LIMIT = 5
 
 # --- Models ---
 class User(UserMixin, db.Model):
     id = db.Column(db.Integer, primary_key=True)
     email = db.Column(db.String(255), unique=True, nullable=False)
     password_hash = db.Column(db.String(255), nullable=False)
-    is_premium = db.Column(db.Boolean, default=False)
+    premium = db.Column(db.Boolean, default=False)
+    subscriptions = db.relationship('Subscription', backref='user', lazy=True)
 
 class Subscription(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(120), nullable=False)
     price = db.Column(db.Float, nullable=False)
     renewal_date = db.Column(db.Date, nullable=False)
-
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    user = db.relationship('User', backref=db.backref('subscriptions', lazy=True))
 
 with app.app_context():
     db.create_all()
@@ -58,19 +58,67 @@ with app.app_context():
 def load_user(user_id):
     return User.query.get(int(user_id))
 
-FREE_LIMIT = 5  # free-tier limit
+# --- Helpers ---
+def upcoming_badge(date_obj):
+    # show "Due soon" if within 7 days
+    return (date_obj - datetime.utcnow().date()).days <= 7
 
-# --- Auth routes ---
+# --- Routes ---
+
+# Landing OR dashboard
+@app.route('/', methods=['GET', 'POST'])
+def index():
+    if not current_user.is_authenticated:
+        # logged-out visitors see the public landing page
+        return render_template('landing.html')
+
+    # logged-in users see the dashboard (same behavior as before)
+    if request.method == 'POST':
+        name = (request.form.get('name') or '').strip()
+        price_raw = (request.form.get('price') or '').strip()
+        date_str = (request.form.get('date') or '').strip()
+
+        # Free-plan guard
+        if not current_user.premium and Subscription.query.filter_by(user_id=current_user.id).count() >= FREE_LIMIT:
+            flash(f"Free limit reached ({FREE_LIMIT}). Upgrade for unlimited.", "warning")
+            return redirect(url_for('index'))
+
+        try:
+            price = float(price_raw)
+            date_val = datetime.strptime(date_str, "%Y-%m-%d").date()
+        except Exception:
+            flash("Please fill in all fields with valid values.", "warning")
+            return redirect(url_for('index'))
+
+        sub = Subscription(name=name, price=price, renewal_date=date_val, user_id=current_user.id)
+        db.session.add(sub)
+        db.session.commit()
+        flash(f"Added subscription: {name}", "success")
+        return redirect(url_for('index'))
+
+    # GET dashboard
+    subs = Subscription.query.filter_by(user_id=current_user.id).all()
+    total = sum(s.price for s in subs)
+    upcoming_names = [s.name for s in subs if upcoming_badge(s.renewal_date)]
+    return render_template(
+        'index.html',
+        subscriptions=subs,
+        subs_total=total,
+        upcoming_names=upcoming_names,
+        is_premium=current_user.premium
+    )
+
+# Sign up
 @app.route('/signup', methods=['GET', 'POST'])
 def signup():
     if request.method == 'POST':
         email = (request.form.get('email') or '').strip().lower()
         password = (request.form.get('password') or '').strip()
         if not email or not password:
-            flash("Email and password are required", "warning")
+            flash("Email and password are required.", "warning")
             return redirect(url_for('signup'))
         if User.query.filter_by(email=email).first():
-            flash("Email already registered — try logging in", "warning")
+            flash("Email already registered — try logging in.", "warning")
             return redirect(url_for('login'))
         user = User(email=email, password_hash=generate_password_hash(password))
         db.session.add(user)
@@ -80,6 +128,7 @@ def signup():
         return redirect(url_for('index'))
     return render_template('signup.html')
 
+# Log in/out
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
@@ -90,7 +139,7 @@ def login():
             flash("Invalid email or password", "warning")
             return redirect(url_for('login'))
         login_user(user)
-        flash("Logged in", "success")
+        flash("Logged in", "info")
         return redirect(url_for('index'))
     return render_template('login.html')
 
@@ -99,133 +148,86 @@ def login():
 def logout():
     logout_user()
     flash("Logged out", "info")
-    return redirect(url_for('login'))
+    return redirect(url_for('index'))
 
-# --- Dashboard ---
-@app.route('/', methods=['GET', 'POST'])
+# Delete subscription
+@app.route('/delete/<int:sub_id>', methods=['POST', 'GET'])
 @login_required
-def index():
-    if request.method == 'POST':
-        name = (request.form.get('name') or '').strip()
-        price = (request.form.get('price') or '').strip()
-        date_str = (request.form.get('renewal_date') or '').strip()
-
-        if not (name and price and date_str):
-            flash("Please fill in all fields", "warning")
-            return redirect(url_for('index'))
-
-        try:
-            price_val = float(price)
-        except ValueError:
-            flash("Price must be a number", "warning")
-            return redirect(url_for('index'))
-
-        try:
-            rdate = datetime.strptime(date_str, "%Y-%m-%d").date()
-        except ValueError:
-            flash("Date must be in YYYY-MM-DD format", "warning")
-            return redirect(url_for('index'))
-
-        # enforce free-tier limit for non-premium users
-        current_count = Subscription.query.filter_by(user_id=current_user.id).count()
-        if not current_user.is_premium and current_count >= FREE_LIMIT:
-            flash("Free limit reached (5). Upgrade to Premium for unlimited subscriptions.", "warning")
-            return redirect(url_for('index'))
-
-        db.session.add(Subscription(name=name, price=price_val, renewal_date=rdate, user_id=current_user.id))
-        db.session.commit()
-        flash(f"Added subscription: {name}", "success")
-        return redirect(url_for('index'))
-
-    subs = Subscription.query.filter_by(user_id=current_user.id).order_by(Subscription.renewal_date.asc()).all()
-    total_cost = sum(s.price for s in subs)
-
-    today = datetime.today().date()
-    week_ahead = today + timedelta(days=7)
-    upcoming_names = [s.name for s in subs if today <= s.renewal_date <= week_ahead]
-
-    return render_template('index.html', subscriptions=subs, total_cost=total_cost, upcoming=upcoming_names)
-
-@app.route('/delete/<int:sub_id>', methods=['POST'])
-@login_required
-def delete_sub(sub_id):
-    sub = Subscription.query.get_or_404(sub_id)
-    if sub.user_id != current_user.id:
-        flash("Not allowed", "warning")
-        return redirect(url_for('index'))
+def delete(sub_id):
+    sub = Subscription.query.filter_by(id=sub_id, user_id=current_user.id).first_or_404()
     db.session.delete(sub)
     db.session.commit()
     flash("Subscription deleted", "info")
     return redirect(url_for('index'))
 
-# --- Upgrade / Stripe Checkout ---
-@app.route('/upgrade', methods=['GET'])
+# Upgrade page
+@app.route('/upgrade')
 @login_required
 def upgrade():
-    if current_user.is_premium:
-        flash("You're already Premium. Unlimited subscriptions enabled.", "info")
+    if current_user.premium:
+        flash("You're already Premium.", "success")
         return redirect(url_for('index'))
     return render_template('upgrade.html')
 
+# Create Stripe Checkout session
 @app.route('/create-checkout-session', methods=['POST'])
 @login_required
 def create_checkout_session():
-    price_id = STRIPE_PRICE_ID
-    if not price_id or not stripe.api_key:
-        flash("Payment not configured. Missing STRIPE keys.", "warning")
+    if not STRIPE_PRICE_ID:
+        flash("Stripe price not configured.", "warning")
         return redirect(url_for('upgrade'))
-
     try:
+        domain = request.host_url.rstrip('/')
         session = stripe.checkout.Session.create(
-            mode="subscription",
-            payment_method_types=["card"],
-            line_items=[{"price": price_id, "quantity": 1}],
-            success_url=url_for('upgrade_success', _external=True) + "?session_id={CHECKOUT_SESSION_ID}",
-            cancel_url=url_for('upgrade', _external=True),
-            customer_email=current_user.email
+            mode='subscription',
+            payment_method_types=['card'],
+            line_items=[{"price": STRIPE_PRICE_ID, "quantity": 1}],
+            success_url=f"{domain}/upgrade/success?session_id={{CHECKOUT_SESSION_ID}}",
+            cancel_url=f"{domain}/upgrade",
+            customer_email=current_user.email,
         )
         return redirect(session.url, code=303)
     except Exception as e:
         flash(f"Stripe error: {e}", "warning")
         return redirect(url_for('upgrade'))
 
-@app.route('/upgrade/success', methods=['GET'])
+# Handle success
+@app.route('/upgrade/success')
 @login_required
 def upgrade_success():
     session_id = request.args.get('session_id')
     if not session_id:
         flash("Missing session id.", "warning")
-        return redirect(url_for('index'))
+        return redirect(url_for('upgrade'))
     try:
-        cs = stripe.checkout.Session.retrieve(session_id)
-        if cs.get("payment_status") == "paid":
-            current_user.is_premium = True
+        s = stripe.checkout.Session.retrieve(session_id)
+        if s.get('payment_status') == 'paid':
+            current_user.premium = True
             db.session.commit()
-            flash("✅ Upgrade successful! Your account is now Premium.", "success")
+            flash("Upgrade successful! Your account is now Premium.", "success")
         else:
             flash("Payment not completed yet.", "warning")
     except Exception as e:
         flash(f"Could not verify payment: {e}", "warning")
     return redirect(url_for('index'))
 
-# --- NEW: Customer Portal (Manage billing) ---
+# Billing portal (manage subscription)
 @app.route('/billing', methods=['GET'])
 @login_required
 def billing():
-    """
-    Opens Stripe's hosted Customer Portal so the user can manage/cancel their subscription.
-    We look up the Stripe customer by the logged-in user's email.
-    """
     try:
-        customers = stripe.Customer.list(email=current_user.email, limit=1)
-        if not customers.data:
-            flash("No Stripe customer found for this account. If you just upgraded, try again in a minute.", "warning")
-            return redirect(url_for('index'))
+        # Create a customer on the fly if needed, using email as lookup
+        customers = stripe.Customer.list(email=current_user.email).data
+        if customers:
+            customer_id = customers[0].id
+        else:
+            customer = stripe.Customer.create(email=current_user.email)
+            customer_id = customer.id
 
-        customer_id = customers.data[0].id
+        domain = request.host_url.rstrip('/')
         portal = stripe.billing_portal.Session.create(
             customer=customer_id,
-            return_url=url_for('index', _external=True),
+            return_url=f"{domain}",
         )
         return redirect(portal.url, code=303)
     except Exception as e:
